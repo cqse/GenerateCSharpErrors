@@ -45,7 +45,7 @@ namespace GenerateCSharpErrors
                 var messages = GetResourceDictionary(client);
                 var docLinks = GetDocumentationLinks(client, options);
                 
-                string GetMessage(string name) => messages.TryGetValue(name, out var msg) ? msg : "";
+                string GetMessage(string name) => messages.GetValueOrDefault(name);
                 string GetDocLink(int value) => docLinks.TryGetValue(value, out var link) ? link : "";
 
                 var errorCodes =
@@ -168,7 +168,7 @@ namespace GenerateCSharpErrors
                         name.Substring(4),
                         value,
                         ParseSeverity(name.Substring(0, 3)),
-                        getMessageByName(name),
+                        getMessageByName(name + "_Title") ?? getMessageByName(name) ?? "",
                         getLinkByValue(value));
                 }
             }
