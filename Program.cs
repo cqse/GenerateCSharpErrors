@@ -35,7 +35,7 @@ namespace GenerateCSharpErrors
         const string ErrorCodesUrl = "https://raw.githubusercontent.com/dotnet/roslyn/master/src/Compilers/CSharp/Portable/Errors/ErrorCode.cs";
         const string ErrorResourcesUrl = "https://raw.githubusercontent.com/dotnet/roslyn/master/src/Compilers/CSharp/Portable/CSharpResources.resx";
         const string DocUrlTemplate = "https://docs.microsoft.com/en-us/dotnet/articles/csharp/language-reference/compiler-messages/cs{0:D4}";
-        const string DocTableOfContentsUrl = "https://raw.githubusercontent.com/dotnet/docs/master/docs/csharp/language-reference/compiler-messages/toc.md";
+        const string DocTableOfContentsUrl = "https://raw.githubusercontent.com/dotnet/docs/master/docs/csharp/language-reference/compiler-messages/toc.yml";
 
         private static IReadOnlyList<ErrorCode> GetErrorCodes(CommandLineOptions options)
         {
@@ -88,7 +88,7 @@ namespace GenerateCSharpErrors
                 return links;
 
             string toc = client.GetStringAsync(DocTableOfContentsUrl).Result;
-            var regex = new Regex(@"\]\(cs(?<value>\d{4}).md\)", RegexOptions.IgnoreCase);
+            var regex = new Regex(@"href: cs(?<value>\d{4}).md", RegexOptions.IgnoreCase);
             var matches = regex.Matches(toc);
             foreach (Match m in matches)
             {
