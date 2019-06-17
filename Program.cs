@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Collections.Immutable;
 using System.IO;
@@ -28,14 +28,14 @@ namespace GenerateCSharpErrors
             
             using (var writer = GetOutputWriter(options))
             {
-                WriteMarkdownTable(errorCodes, writer);
+                WriteMarkdownTable(errorCodes, writer, options);
             }
         }
 
         const string ErrorCodesUrl = "https://raw.githubusercontent.com/dotnet/roslyn/master/src/Compilers/CSharp/Portable/Errors/ErrorCode.cs";
         const string ErrorResourcesUrl = "https://raw.githubusercontent.com/dotnet/roslyn/master/src/Compilers/CSharp/Portable/CSharpResources.resx";
         const string DocUrlTemplate = "https://docs.microsoft.com/en-us/dotnet/articles/csharp/language-reference/compiler-messages/cs{0:D4}";
-        const string DocTableOfContentsUrl = "https://raw.githubusercontent.com/dotnet/docs/master/docs/csharp/language-reference/compiler-messages/toc.yml";
+        const string DocLangReferenceUrl = "https://raw.githubusercontent.com/dotnet/docs/master/docs/csharp/language-reference/compiler-messages";
 
         private static IReadOnlyList<ErrorCode> GetErrorCodes(CommandLineOptions options)
         {
@@ -44,13 +44,15 @@ namespace GenerateCSharpErrors
                 var enumMembers = GetErrorCodeEnumMembers(client);
                 var messages = GetResourceDictionary(client);
                 var docLinks = GetDocumentationLinks(client, options);
+                var docDetails = GetDocDetails(client, docLinks.Keys, options);
                 
                 string GetMessage(string name) => messages.GetValueOrDefault(name);
                 string GetDocLink(int value) => docLinks.TryGetValue(value, out var link) ? link : "";
+                string GetDetails(int value) => docDetails.TryGetValue(value, out var link) ? link : "";
 
                 var errorCodes =
                     enumMembers
-                        .Select(m => ErrorCode.Create(m, GetMessage, GetDocLink))
+                        .Select(m => ErrorCode.Create(m, GetMessage, GetDocLink, GetDetails))
                         .ToList();
 
                 return errorCodes;
@@ -87,7 +89,7 @@ namespace GenerateCSharpErrors
             if (!options.IncludeLinks)
                 return links;
 
-            string toc = client.GetStringAsync(DocTableOfContentsUrl).Result;
+            string toc = client.GetStringAsync($"{DocLangReferenceUrl}/toc.yml").Result;
             var regex = new Regex(@"href: cs(?<value>\d{4}).md", RegexOptions.IgnoreCase);
             var matches = regex.Matches(toc);
             foreach (Match m in matches)
@@ -98,6 +100,23 @@ namespace GenerateCSharpErrors
             }
 
             return links;
+        }
+
+        private static IReadOnlyDictionary<int, string> GetDocDetails(HttpClient client, IEnumerable<int> detailIds, CommandLineOptions options)
+        {
+            var details = new Dictionary<int, string>();
+            if (!options.IncludeDetails)
+                return details;
+
+            foreach(int id in detailIds)
+            {
+                string doc = client.GetStringAsync($"{DocLangReferenceUrl}/cs{id:D4}.md").Result;
+                // Skip Preamble, H1 and any preceding new line
+                doc = string.Join("\n", doc.Split('\n').SkipWhile(l => !l.StartsWith("# ")).Skip(1).SkipWhile(string.IsNullOrWhiteSpace));
+                details[id] = doc;
+            }
+            
+            return details;
         }
 
         private static TextWriter GetOutputWriter(CommandLineOptions options)
@@ -113,7 +132,7 @@ namespace GenerateCSharpErrors
             }
         }
 
-        private static void WriteMarkdownTable(IReadOnlyList<ErrorCode> errorCodes, TextWriter writer)
+        private static void WriteMarkdownTable(IReadOnlyList<ErrorCode> errorCodes, TextWriter writer, CommandLineOptions options)
         {
             writer.WriteLine("# All C# errors and warnings");
             
@@ -126,12 +145,24 @@ namespace GenerateCSharpErrors
                     ? e.Code
                     : $"[{e.Code}]({e.Link})";
 
+            if (options.IncludeDetails)
+            {
+                writer.WriteLine("|Code|Severity|Message|Details|");
+                writer.WriteLine("|----|--------|-------|-------|");
+            }
+            else
+            {
             writer.WriteLine("|Code|Severity|Message|");
             writer.WriteLine("|----|--------|-------|");
+            }
             foreach (var e in errorCodes)
             {
                 if (e.Severity== Severity.Unknown) continue;
-                writer.WriteLine($"|{Link(e)}|{e.Severity}|{e.Message}|");
+                writer.Write($"|{Link(e)}|{e.Severity}|{e.Message}|");
+                if (options.IncludeDetails) {
+                    writer.Write($"{e.Details}|".Replace("\n", "<br>"));
+            }
+                writer.WriteLine();
             }
 
             writer.WriteLine();
@@ -154,12 +185,13 @@ namespace GenerateCSharpErrors
             public static ErrorCode Create(
                 EnumMemberDeclarationSyntax member,
                 Func<string, string> getMessageByName,
-                Func<int, string> getLinkByValue)
+                Func<int, string> getLinkByValue,
+                Func<int, string> getDetailsByValue)
             {
                 string name = member.Identifier.ValueText;
                 if (name == "Void" || name == "Unknown")
                 {
-                    return new ErrorCode(name, 0, Severity.Unknown, "", "");
+                    return new ErrorCode(name, 0, Severity.Unknown, "", "", "");
                 }
                 else
                 {
@@ -169,17 +201,19 @@ namespace GenerateCSharpErrors
                         value,
                         ParseSeverity(name.Substring(0, 3)),
                         getMessageByName(name + "_Title") ?? getMessageByName(name) ?? "",
-                        getLinkByValue(value));
+                        getLinkByValue(value),
+                        getDetailsByValue(value));
                 }
             }
             
-            private ErrorCode(string name, int value, Severity severity, string message, string link)
+            private ErrorCode(string name, int value, Severity severity, string message, string link, string details)
             {
                 Name = name;
                 Value = value;
                 Severity = severity;
                 Message = message;
                 Link = link;
+                Details = details;
             }
             
             public string Name { get; }
@@ -188,6 +222,7 @@ namespace GenerateCSharpErrors
             public Severity Severity { get; }
             public string Message { get; }
             public string Link { get; }
+            public string Details { get; set; }
             
             private static Severity ParseSeverity(string severity)
             {
@@ -222,7 +257,10 @@ namespace GenerateCSharpErrors
         class CommandLineOptions
         {
             public string Output { get; set; }
+            
             public bool IncludeLinks { get; set; }
+
+            public bool IncludeDetails { get; set; }
 
             private static readonly IImmutableSet<string> _helpOptions =
                 ImmutableHashSet.Create(
@@ -236,6 +274,10 @@ namespace GenerateCSharpErrors
                 ImmutableHashSet.Create(
                     StringComparer.OrdinalIgnoreCase,
                     "-l", "--link");
+            private static readonly IImmutableSet<string> _detailsOptions =
+                ImmutableHashSet.Create(
+                    StringComparer.OrdinalIgnoreCase,
+                    "-d", "--details");
             public static (CommandLineOptions options, int? exitCode) Parse(string[] args)
             {
                 var options = new CommandLineOptions();
@@ -261,6 +303,10 @@ namespace GenerateCSharpErrors
                     else if (_linksOptions.Contains(option))
                     {
                         options.IncludeLinks = true;
+                    }
+                    else if (_detailsOptions.Contains(option))
+                    {
+                        options.IncludeDetails = true;
                     }
                     else
                     {
@@ -291,6 +337,7 @@ namespace GenerateCSharpErrors
                 Console.WriteLine("  -h|--help              Show this help message");
                 Console.WriteLine("  -o|--output <file>     Output to the specified file (default: output to the console)");
                 Console.WriteLine("  -l|--link              Include links to documentation when they exist");
+                Console.WriteLine("  -d|--details           Gather documentation in markdown format");
                 Console.WriteLine();
             }
         }
