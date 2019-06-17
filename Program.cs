@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Collections.Immutable;
 using System.IO;
@@ -9,6 +9,7 @@ using System.Text.RegularExpressions;
 using System.Xml.Linq;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
+using Newtonsoft.Json;
 
 namespace GenerateCSharpErrors
 {
@@ -28,11 +29,19 @@ namespace GenerateCSharpErrors
             
             using (var writer = GetOutputWriter(options))
             {
-                WriteMarkdownTable(errorCodes, writer, options);
+                if (options.JsonOutput)
+                {
+                    WriteJson(errorCodes, writer);
+                }
+                else
+                {
+                    WriteMarkdownTable(errorCodes, writer, options);
+                }
             }
         }
 
         const string ErrorCodesUrl = "https://raw.githubusercontent.com/dotnet/roslyn/master/src/Compilers/CSharp/Portable/Errors/ErrorCode.cs";
+        const string ErrorFactsUrl = "https://raw.githubusercontent.com/dotnet/roslyn/master/src/Compilers/CSharp/Portable/Errors/ErrorFacts.cs";
         const string ErrorResourcesUrl = "https://raw.githubusercontent.com/dotnet/roslyn/master/src/Compilers/CSharp/Portable/CSharpResources.resx";
         const string DocUrlTemplate = "https://docs.microsoft.com/en-us/dotnet/articles/csharp/language-reference/compiler-messages/cs{0:D4}";
         const string DocLangReferenceUrl = "https://raw.githubusercontent.com/dotnet/docs/master/docs/csharp/language-reference/compiler-messages";
@@ -42,17 +51,19 @@ namespace GenerateCSharpErrors
             using (var client = new HttpClient())
             {
                 var enumMembers = GetErrorCodeEnumMembers(client);
+                var warningLevels = GetWarningLevels(client);
                 var messages = GetResourceDictionary(client);
                 var docLinks = GetDocumentationLinks(client, options);
                 var docDetails = GetDocDetails(client, docLinks.Keys, options);
                 
                 string GetMessage(string name) => messages.GetValueOrDefault(name);
+                int GetWarningLevel(string name) => warningLevels.GetValueOrDefault(name);
                 string GetDocLink(int value) => docLinks.TryGetValue(value, out var link) ? link : "";
                 string GetDetails(int value) => docDetails.TryGetValue(value, out var link) ? link : "";
 
                 var errorCodes =
                     enumMembers
-                        .Select(m => ErrorCode.Create(m, GetMessage, GetDocLink, GetDetails))
+                        .Select(m => ErrorCode.Create(m, GetMessage, GetWarningLevel, GetDocLink, GetDetails))
                         .ToList();
 
                 return errorCodes;
@@ -69,6 +80,32 @@ namespace GenerateCSharpErrors
                     .OfType<EnumDeclarationSyntax>()
                     .First(e => e.Identifier.ValueText == "ErrorCode");
             return enumDeclaration.Members;
+        }
+
+        private static IReadOnlyDictionary<string, int> GetWarningLevels(HttpClient client)
+        {
+            var levels = new Dictionary<string, int>();
+            string errorFactsFileContent = client.GetStringAsync(ErrorFactsUrl).Result;
+            var syntaxTree = CSharpSyntaxTree.ParseText(errorFactsFileContent);
+            var root = syntaxTree.GetRoot();
+            var enumDeclaration =
+                root.DescendantNodes()
+                    .OfType<MethodDeclarationSyntax>()
+                    .First(e => e.Identifier.ValueText == "GetWarningLevel");
+            var sections = enumDeclaration.Body.DescendantNodes().OfType<SwitchStatementSyntax>().First().Sections;
+            foreach(var section in sections)
+            {
+                var returnStatement = section.DescendantNodes().OfType<ReturnStatementSyntax>().First();
+                var returnToken = returnStatement.Expression.GetFirstToken();
+                if (returnToken.Kind() == SyntaxKind.NumericLiteralToken)
+                {
+                    foreach (var label in section.Labels)
+                    {
+                        levels[label.ColonToken.GetPreviousToken().ValueText] = (int)returnToken.Value;
+                    }
+                }
+            }
+            return levels;
         }
 
         private static IReadOnlyDictionary<string, string> GetResourceDictionary(HttpClient client)
@@ -132,6 +169,19 @@ namespace GenerateCSharpErrors
             }
         }
 
+        private static void WriteJson(IReadOnlyList<ErrorCode> errorCodes, TextWriter writer)
+        {
+            new JsonSerializer { Formatting = Formatting.Indented }.Serialize(writer, errorCodes.Select(error => new {
+                id = error.Code,
+                message = error.Message,
+                description = error.Details,
+                category = $"Level {error.WarningLevel}",
+                severity = error.Severity.ToString(),
+                type = error.Name,
+                link = error.Link,
+            }));
+        }
+
         private static void WriteMarkdownTable(IReadOnlyList<ErrorCode> errorCodes, TextWriter writer, CommandLineOptions options)
         {
             writer.WriteLine("# All C# errors and warnings");
@@ -152,8 +202,8 @@ namespace GenerateCSharpErrors
             }
             else
             {
-            writer.WriteLine("|Code|Severity|Message|");
-            writer.WriteLine("|----|--------|-------|");
+                writer.WriteLine("|Code|Severity|Message|");
+                writer.WriteLine("|----|--------|-------|");
             }
             foreach (var e in errorCodes)
             {
@@ -161,7 +211,7 @@ namespace GenerateCSharpErrors
                 writer.Write($"|{Link(e)}|{e.Severity}|{e.Message}|");
                 if (options.IncludeDetails) {
                     writer.Write($"{e.Details}|".Replace("\n", "<br>"));
-            }
+                }
                 writer.WriteLine();
             }
 
@@ -185,13 +235,14 @@ namespace GenerateCSharpErrors
             public static ErrorCode Create(
                 EnumMemberDeclarationSyntax member,
                 Func<string, string> getMessageByName,
+                Func<string, int> getWarningLevel,
                 Func<int, string> getLinkByValue,
                 Func<int, string> getDetailsByValue)
             {
                 string name = member.Identifier.ValueText;
                 if (name == "Void" || name == "Unknown")
                 {
-                    return new ErrorCode(name, 0, Severity.Unknown, "", "", "");
+                    return new ErrorCode(name, 0, Severity.Unknown, "", 0, "", "");
                 }
                 else
                 {
@@ -201,17 +252,19 @@ namespace GenerateCSharpErrors
                         value,
                         ParseSeverity(name.Substring(0, 3)),
                         getMessageByName(name + "_Title") ?? getMessageByName(name) ?? "",
+                        getWarningLevel(name),
                         getLinkByValue(value),
-                        getDetailsByValue(value));
+                        getDetailsByValue(value) ?? getMessageByName(name + "_Description"));
                 }
             }
             
-            private ErrorCode(string name, int value, Severity severity, string message, string link, string details)
+            private ErrorCode(string name, int value, Severity severity, string message, int warningLevel, string link, string details)
             {
                 Name = name;
                 Value = value;
                 Severity = severity;
                 Message = message;
+                WarningLevel = warningLevel;
                 Link = link;
                 Details = details;
             }
@@ -223,7 +276,8 @@ namespace GenerateCSharpErrors
             public string Message { get; }
             public string Link { get; }
             public string Details { get; set; }
-            
+            public int WarningLevel { get; set; }
+
             private static Severity ParseSeverity(string severity)
             {
                 switch (severity)
@@ -258,6 +312,8 @@ namespace GenerateCSharpErrors
         {
             public string Output { get; set; }
             
+            public bool JsonOutput { get; set; }
+            
             public bool IncludeLinks { get; set; }
 
             public bool IncludeDetails { get; set; }
@@ -278,6 +334,10 @@ namespace GenerateCSharpErrors
                 ImmutableHashSet.Create(
                     StringComparer.OrdinalIgnoreCase,
                     "-d", "--details");
+            private static readonly IImmutableSet<string> _jsonOptions =
+                ImmutableHashSet.Create(
+                    StringComparer.OrdinalIgnoreCase,
+                    "-j", "--json");
             public static (CommandLineOptions options, int? exitCode) Parse(string[] args)
             {
                 var options = new CommandLineOptions();
@@ -303,6 +363,10 @@ namespace GenerateCSharpErrors
                     else if (_linksOptions.Contains(option))
                     {
                         options.IncludeLinks = true;
+                    }
+                    else if (_jsonOptions.Contains(option))
+                    {
+                        options.JsonOutput = true;
                     }
                     else if (_detailsOptions.Contains(option))
                     {
@@ -338,6 +402,7 @@ namespace GenerateCSharpErrors
                 Console.WriteLine("  -o|--output <file>     Output to the specified file (default: output to the console)");
                 Console.WriteLine("  -l|--link              Include links to documentation when they exist");
                 Console.WriteLine("  -d|--details           Gather documentation in markdown format");
+                Console.WriteLine("  -j|--json              Write output in JSON format");
                 Console.WriteLine();
             }
         }
