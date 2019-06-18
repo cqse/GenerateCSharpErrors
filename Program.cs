@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Collections.Immutable;
 using System.IO;
@@ -56,7 +56,7 @@ namespace GenerateCSharpErrors
                 var docLinks = GetDocumentationLinks(client, options);
                 var docDetails = GetDocDetails(client, docLinks.Keys, options);
                 
-                string GetMessage(string name) => messages.GetValueOrDefault(name);
+                string GetMessage(string name) => messages.GetValueOrDefault(name, "").Trim().TrimEnd('.').TrimEnd();
                 int GetWarningLevel(string name) => warningLevels.GetValueOrDefault(name);
                 string GetDocLink(int value) => docLinks.TryGetValue(value, out var link) ? link : "";
                 string GetDetails(int value) => docDetails.TryGetValue(value, out var link) ? link : "";
@@ -174,7 +174,7 @@ namespace GenerateCSharpErrors
             new JsonSerializer { Formatting = Formatting.Indented }.Serialize(writer, errorCodes.Select(error => new {
                 id = error.Code,
                 message = error.Message,
-                description = error.Details,
+                description = error.Details + (string.IsNullOrWhiteSpace(error.Link) ? "" : $"\n\n[See Microsoft Documentation]({error.Link})"),
                 category = $"Level {error.WarningLevel}",
                 severity = error.Severity.ToString(),
                 type = error.Name,
